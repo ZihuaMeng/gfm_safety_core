@@ -1,0 +1,84 @@
+# ============================================================
+# GFM-Safety .gitignore — strict rules for clean HPC repo
+# ============================================================
+
+# === Model weights and tensors ===
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# === Numerical data files ===
+*.npy
+*.npz
+
+# === Archives ===
+*.zip
+*.tar.gz
+*.tgz
+
+# === Dataset and cache directories ===
+data/
+dataset/
+checkpoints/
+
+# === Generated outputs ===
+outputs/
+results/
+runs/
+wandb/
+logs/
+
+# === Bundle / work snapshots (derived, regenerable) ===
+work/
+
+# === Python bytecode and caches ===
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# === Jupyter ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === Virtual environments / conda ===
+.venv/
+.env
+.conda/
+conda-meta/
+
+# === IDE and editor ===
+.vscode/
+.idea/
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# === AI agent / local tool state ===
+.claude/
+.codex/
+
+# === Nested repo git dirs (absorbed into parent) ===
+repos/bgrl/.git/
+repos/graphmae/.git/
+
+# === Cached datasets inside repos ===
+repos/graphmae/data/
+repos/graphmae/dataset/
+repos/graphmae/imgs/
+repos/graphmae/chem/init_weights/
+repos/bgrl/runs/
+repos/bgrl/img/
+
+# === Backup directories ===
+repos/bgrl_backup_before_graphmae_patch/
+
+# === Colab-only helpers ===
+# pack_colab_payload.py excluded from clean repo at copy time
+# (not gitignored since scripts/ is tracked)

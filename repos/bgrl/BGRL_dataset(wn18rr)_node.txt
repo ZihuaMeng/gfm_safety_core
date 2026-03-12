@@ -1,0 +1,2 @@
+best valid acc : nan best valid std : nan best test acc : nan best test std : nan 
+best valid acc : nan best valid std : nan best test acc : nan best test std : nan 

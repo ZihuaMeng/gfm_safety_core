@@ -1,0 +1,5 @@
+best valid acc : 59.40266036987305 best valid std : 0.11376798152923584 best test acc : 56.1722526550293 best test std : 0.19860079884529114 
+best valid acc : 59.405517578125 best valid std : 0.08330810815095901 best test acc : 56.182342529296875 best test std : 0.13583597540855408 
+best valid acc : nan best valid std : nan best test acc : nan best test std : nan 
+best valid acc : nan best valid std : nan best test acc : nan best test std : nan 
+best valid acc : 58.812042236328125 best valid std : 0.06330461800098419 best test acc : 55.361297607421875 best test std : 0.14581048488616943 
