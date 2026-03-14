@@ -3,7 +3,7 @@
 Public entry points:
     run_node_eval()   — Node classification (GraphMAE / BGRL on ogbn-arxiv)
     run_graph_eval()  — Graph classification (GraphMAE on ogbg-molpcba)
-    run_link_eval()   — Link prediction (experimental WN18RR)
+    run_link_eval()   — Link prediction (experimental WN18RR, GraphMAE / BGRL)
 
 Each runner owns: feature preparation, dataset/task validation, head construction,
 train/eval loop execution, evaluator dispatch, and result JSON assembly.
@@ -87,6 +87,8 @@ class GraphEvalConfig:
     num_workers: int
     max_train_steps: int | None
     max_eval_batches: int | None
+    ft_epochs: int | None = None
+    graph_eval_every: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,11 +100,12 @@ F = None
 GraphHead = None
 LinkHead = None
 NodeHead = None
+mean_pool = None
 load_encoder = None
 
 
 def _ensure_eval_deps() -> None:
-    global F, GraphHead, LinkHead, NodeHead, load_encoder, torch
+    global F, GraphHead, LinkHead, NodeHead, mean_pool, load_encoder, torch
 
     if torch is None or F is None:
         import torch as _torch
@@ -111,12 +114,18 @@ def _ensure_eval_deps() -> None:
         torch = _torch
         F = _F
 
-    if GraphHead is None or LinkHead is None or NodeHead is None:
-        from eval.heads import GraphHead as _GraphHead, LinkHead as _LinkHead, NodeHead as _NodeHead
+    if GraphHead is None or LinkHead is None or NodeHead is None or mean_pool is None:
+        from eval.heads import (
+            GraphHead as _GraphHead,
+            LinkHead as _LinkHead,
+            NodeHead as _NodeHead,
+            mean_pool as _mean_pool,
+        )
 
         GraphHead = _GraphHead
         LinkHead = _LinkHead
         NodeHead = _NodeHead
+        mean_pool = _mean_pool
 
     if load_encoder is None:
         from eval.load_encoder import load_encoder as _load_encoder
@@ -185,6 +194,7 @@ def format_debug_notes(config: GraphEvalConfig) -> str:
     truncation = "per_split_first_n" if config.debug and config.debug_max_graphs > 0 else "disabled"
     max_train_steps = config.max_train_steps if config.max_train_steps is not None else "none"
     max_eval_batches = config.max_eval_batches if config.max_eval_batches is not None else "none"
+    graph_eval_every = config.graph_eval_every if config.graph_eval_every is not None else "every_epoch"
     return (
         "local_debug_run=true; "
         f"debug_mode={str(config.debug).lower()}; "
@@ -193,6 +203,7 @@ def format_debug_notes(config: GraphEvalConfig) -> str:
         f"num_workers={config.num_workers}; "
         f"max_train_steps={max_train_steps}; "
         f"max_eval_batches={max_eval_batches}; "
+        f"graph_eval_every={graph_eval_every}; "
         f"split_truncation={truncation}; "
         "official_metric=false"
     )
@@ -669,6 +680,72 @@ def _collate_graph_batch(batch):
     return dgl.batch(graphs), labels
 
 
+# ---------------------------------------------------------------------------
+# Frozen-encoder precompute for graph eval
+# ---------------------------------------------------------------------------
+
+
+def _precompute_graph_embeddings(encoder, dataloader, device, *, max_batches=None, debug=False):
+    """Run frozen encoder + mean-pool once over a DataLoader.
+
+    Returns ``(graph_embeddings, labels)`` as **CPU** tensors.
+    ``graph_embeddings`` has shape ``[num_graphs, hidden_dim]``.
+    """
+    all_embeddings: list = []
+    all_labels: list = []
+
+    for batch_idx, (batch_graph, labels) in enumerate(dataloader):
+        if max_batches is not None and batch_idx >= max_batches:
+            if debug:
+                print(f"[debug] precompute: stopped after {max_batches} batch(es)")
+            break
+        batch_graph = batch_graph.to(device)
+        batch_index = _batch_index_from_counts(batch_graph.batch_num_nodes(), device)
+        with torch.no_grad():
+            node_emb = encoder(batch_graph, batch_graph.ndata["attr"].to(device))
+            graph_emb = mean_pool(node_emb, batch_index)
+        all_embeddings.append(graph_emb.cpu())
+        all_labels.append(labels.float())
+
+    if not all_embeddings:
+        raise ValueError("No graph batches were available for precomputation.")
+    return torch.cat(all_embeddings, dim=0), torch.cat(all_labels, dim=0)
+
+
+def _evaluate_pcba_from_logits(logits, labels, evaluator, split_name):
+    """Compute PCBA AP from pre-computed logits and label tensors."""
+    y_pred = torch.sigmoid(logits).cpu()
+    y_true = labels.cpu()
+
+    usable_tasks, positive_labels, negative_labels, labeled_positions = _pcba_ap_stats(y_true)
+    if usable_tasks == 0:
+        raise ValueError(
+            _structured_notes(
+                "pcba_ap_unavailable",
+                split=split_name,
+                graphs_evaluated=int(y_true.shape[0]),
+                labeled_positions=labeled_positions,
+                positive_labels=positive_labels,
+                negative_labels=negative_labels,
+                detail=(
+                    f"No ogbg-molpcba task in the {split_name} split has both positive and "
+                    "negative labels after embedding precompute"
+                ),
+            )
+        )
+    try:
+        return float(evaluator.eval({"y_true": y_true, "y_pred": y_pred})["ap"])
+    except RuntimeError as exc:
+        raise ValueError(
+            _structured_notes(
+                "pcba_ogb_evaluator_error",
+                split=split_name,
+                graphs_evaluated=int(y_true.shape[0]),
+                detail=str(exc),
+            )
+        ) from exc
+
+
 def _evaluate_pcba_split(
     encoder,
     head,
@@ -926,25 +1003,81 @@ def _run_graph_eval_graphmae(
             **_debug_loader_kw,
         )
 
-    head = GraphHead(hidden_dim=encoder.hidden_dim, num_classes=int(num_classes)).to(device)
+    # ------------------------------------------------------------------
+    # Precompute frozen graph embeddings (encoder runs ONCE per split)
+    # ------------------------------------------------------------------
+    import time as _time
+
+    _prefix = "[debug]" if graph_eval_config.debug else "[eval]"
+
+    _t0 = _time.time()
+    print(f"{_prefix} precomputing frozen graph embeddings (train) ...")
+    train_embeds, train_labels = _precompute_graph_embeddings(
+        encoder, train_loader, device,
+    )
+    print(f"{_prefix}   train: {train_embeds.shape[0]} graphs, dim={train_embeds.shape[1]}")
+
+    print(f"{_prefix} precomputing frozen graph embeddings (valid) ...")
+    valid_embeds, valid_labels = _precompute_graph_embeddings(
+        encoder, valid_loader, device,
+        max_batches=graph_eval_config.max_eval_batches,
+        debug=graph_eval_config.debug,
+    )
+    print(f"{_prefix}   valid: {valid_embeds.shape[0]} graphs")
+
+    print(f"{_prefix} precomputing frozen graph embeddings (test) ...")
+    test_embeds, test_labels = _precompute_graph_embeddings(
+        encoder, test_loader, device,
+        max_batches=graph_eval_config.max_eval_batches,
+        debug=graph_eval_config.debug,
+    )
+    _embed_elapsed = _time.time() - _t0
+    print(
+        f"{_prefix}   test: {test_embeds.shape[0]} graphs  "
+        f"(precompute total: {_embed_elapsed:.1f}s)"
+    )
+
+    # Move cached embeddings to training device; free encoder from GPU.
+    train_embeds = train_embeds.to(device)
+    train_labels = train_labels.to(device)
+    valid_embeds = valid_embeds.to(device)
+    valid_labels = valid_labels.to(device)
+    test_embeds = test_embeds.to(device)
+    test_labels = test_labels.to(device)
+
+    encoder.cpu()
+    if device != "cpu":
+        torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------------
+    # Train linear head on cached graph embeddings
+    # ------------------------------------------------------------------
+    hidden_dim = int(train_embeds.shape[1])
+    head = GraphHead(hidden_dim=hidden_dim, num_classes=int(num_classes)).to(device)
     optimizer = torch.optim.Adam(head.parameters(), lr=GRAPH_LR)
+
+    effective_ft_epochs = (
+        graph_eval_config.ft_epochs
+        if graph_eval_config.ft_epochs is not None
+        else GRAPH_EPOCHS
+    )
+    eval_every = graph_eval_config.graph_eval_every  # None → every epoch
+    batch_size = graph_eval_config.batch_size
 
     best_valid = float("-inf")
     best_state = None
-    best_test = float("nan")
     train_steps = 0
     stop_training = False
+    n_train = train_embeds.shape[0]
 
-    for _ in range(GRAPH_EPOCHS):
+    _t_train = _time.time()
+    for epoch in range(effective_ft_epochs):
         head.train()
-        for batch_graph, labels in train_loader:
-            batch_graph = batch_graph.to(device)
-            labels = labels.to(device).float()
-            batch_index = _batch_index_from_counts(batch_graph.batch_num_nodes(), device)
-            with torch.no_grad():
-                node_embeddings = encoder(batch_graph, batch_graph.ndata["attr"].to(device))
-            logits = head(node_embeddings, batch_index)
-            loss = _masked_bce_loss(logits, labels)
+        perm = torch.randperm(n_train, device=train_embeds.device)
+        for start in range(0, n_train, batch_size):
+            idx = perm[start : start + batch_size]
+            logits = head.linear(train_embeds[idx])
+            loss = _masked_bce_loss(logits, train_labels[idx])
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -954,43 +1087,52 @@ def _run_graph_eval_graphmae(
                 graph_eval_config.max_train_steps is not None
                 and train_steps >= graph_eval_config.max_train_steps
             ):
-                prefix = "[debug]" if graph_eval_config.debug else "[eval]"
                 print(
-                    f"{prefix} max_train_steps reached: "
+                    f"{_prefix} max_train_steps reached: "
                     f"stopping after {graph_eval_config.max_train_steps} optimizer step(s)."
                 )
                 stop_training = True
                 break
 
-        valid_ap = _evaluate_pcba_split(
-            encoder,
-            head,
-            valid_loader,
-            evaluator,
-            device,
-            split_name="valid",
-            max_batches=graph_eval_config.max_eval_batches,
-            debug=graph_eval_config.debug,
-        )
-        test_ap = _evaluate_pcba_split(
-            encoder,
-            head,
-            test_loader,
-            evaluator,
-            device,
-            split_name="test",
-            max_batches=graph_eval_config.max_eval_batches,
-            debug=graph_eval_config.debug,
-        )
-        if valid_ap >= best_valid:
-            best_valid = valid_ap
-            best_test = test_ap
-            best_state = copy.deepcopy(head.state_dict())
+        # Validate at cadence: every eval_every epochs, plus always on the
+        # last epoch (or when early-stopped by max_train_steps).
+        is_last = (epoch == effective_ft_epochs - 1) or stop_training
+        should_eval = is_last or eval_every is None or ((epoch + 1) % eval_every == 0)
+
+        if should_eval:
+            head.eval()
+            with torch.no_grad():
+                valid_logits = head.linear(valid_embeds)
+            valid_ap = _evaluate_pcba_from_logits(
+                valid_logits, valid_labels, evaluator, "valid",
+            )
+            if valid_ap >= best_valid:
+                best_valid = valid_ap
+                best_state = copy.deepcopy(head.state_dict())
 
         if stop_training:
             break
 
+    # Final test AP — computed once with the best head state.
     head.load_state_dict(_select_best_state(best_state, head))
+    head.eval()
+    with torch.no_grad():
+        test_logits = head.linear(test_embeds)
+    best_test = _evaluate_pcba_from_logits(
+        test_logits, test_labels, evaluator, "test",
+    )
+
+    _train_elapsed = _time.time() - _t_train
+    _total_elapsed = _time.time() - _t0
+    print(
+        f"{_prefix} graph eval done: {train_steps} steps in {_train_elapsed:.1f}s, "
+        f"best_valid_ap={best_valid:.6f}, test_ap={best_test:.6f}  "
+        f"(total wall: {_total_elapsed:.1f}s)"
+    )
+
+    eval_cadence_note = (
+        f" graph_eval_every={eval_every}," if eval_every is not None else ""
+    )
     return EvalResult(
         model="graphmae",
         dataset="ogbg-molpcba",
@@ -1001,8 +1143,243 @@ def _run_graph_eval_graphmae(
         notes=format_debug_notes(graph_eval_config)
         if graph_eval_config.debug
         else (
-            "Frozen GraphMAE encoder with mean-pool linear graph head; AP is computed "
-            "with the official ogbg-molpcba OGB evaluator on official train/valid/test splits."
+            "Frozen GraphMAE encoder with mean-pool linear graph head; "
+            "graph embeddings precomputed once under torch.no_grad(); "
+            f"ft_epochs={effective_ft_epochs},{eval_cadence_note} "
+            "AP via official ogbg-molpcba OGB evaluator on official splits."
+        ),
+    )
+
+
+def _precompute_graph_embeddings_bgrl(
+    encoder, dataloader, device, *, max_batches=None, debug=False,
+):
+    """Run frozen BGRL encoder + mean-pool once over a PyG DataLoader.
+
+    BGRL's encoder interface: ``encoder(x, edge_index, edge_weight=None)``
+    returns node embeddings.  These are aggregated per-graph via mean_pool
+    using PyG's ``batch.batch`` tensor.
+
+    Returns ``(graph_embeddings, labels)`` as CPU tensors.
+    """
+    all_embeddings: list = []
+    all_labels: list = []
+
+    for batch_idx, batch in enumerate(dataloader):
+        if max_batches is not None and batch_idx >= max_batches:
+            if debug:
+                print(f"[debug] precompute_bgrl: stopped after {max_batches} batch(es)")
+            break
+        batch = batch.to(device)
+        # PCBA atom features may be integer (Long); cast to float for GCN
+        x = batch.x.float() if batch.x is not None else torch.ones((batch.num_nodes, 1), device=device)
+        with torch.no_grad():
+            node_emb = encoder(x, batch.edge_index, edge_weight=None)
+            graph_emb = mean_pool(node_emb, batch.batch)
+        all_embeddings.append(graph_emb.cpu())
+        all_labels.append(batch.y.float().cpu())
+
+    if not all_embeddings:
+        raise ValueError("No graph batches were available for BGRL precomputation.")
+    return torch.cat(all_embeddings, dim=0), torch.cat(all_labels, dim=0)
+
+
+def _run_graph_eval_bgrl(
+    encoder,
+    device: str,
+    graph_eval_config: GraphEvalConfig,
+    *,
+    feat_pt: str | None = None,
+) -> EvalResult:
+    """Graph classification eval for BGRL on ogbg-molpcba via PyG DataLoader."""
+    _validate_graph_checkpoint_task(encoder, dataset="ogbg-molpcba")
+    if feat_pt is not None:
+        _validate_pcba_native_graph_inputs(
+            encoder, dataset="ogbg-molpcba",
+            native_feature_dim=-1, feat_pt=feat_pt,
+        )
+
+    # Load PCBA via PyG (not DGL — BGRL uses PyG backend)
+    from ogb.graphproppred import PygGraphPropPredDataset
+    from torch_geometric.loader import DataLoader as PyGDataLoader
+
+    dataset = PygGraphPropPredDataset(name="ogbg-molpcba", root="dataset")
+
+    _sample = dataset[0]
+    _native_feat_dim = int(_sample.x.shape[1]) if _sample.x is not None else 1
+    _validate_pcba_native_graph_inputs(
+        encoder, dataset="ogbg-molpcba",
+        native_feature_dim=_native_feat_dim, feat_pt=None,
+    )
+
+    split_idx = dataset.get_idx_split()
+    from ogb.graphproppred import Evaluator
+    evaluator = Evaluator(name="ogbg-molpcba")
+    num_classes = int(dataset.num_tasks)
+
+    # Build subsets
+    train_indices = _truncate_split_indices(split_idx["train"], graph_eval_config)
+    valid_indices = split_idx["valid"]
+    test_indices = split_idx["test"]
+    if graph_eval_config.debug and graph_eval_config.debug_max_graphs > 0:
+        valid_indices = valid_indices[: graph_eval_config.debug_max_graphs]
+        test_indices = test_indices[: graph_eval_config.debug_max_graphs]
+
+    train_loader = PyGDataLoader(
+        dataset[train_indices], batch_size=graph_eval_config.batch_size,
+        shuffle=True, num_workers=graph_eval_config.num_workers,
+    )
+    valid_loader = PyGDataLoader(
+        dataset[valid_indices], batch_size=graph_eval_config.batch_size,
+        shuffle=False, num_workers=graph_eval_config.num_workers,
+    )
+    test_loader = PyGDataLoader(
+        dataset[test_indices], batch_size=graph_eval_config.batch_size,
+        shuffle=False, num_workers=graph_eval_config.num_workers,
+    )
+
+    # ------------------------------------------------------------------
+    # Precompute frozen graph embeddings (encoder runs ONCE per split)
+    # ------------------------------------------------------------------
+    import time as _time
+
+    _prefix = "[debug]" if graph_eval_config.debug else "[eval]"
+
+    _t0 = _time.time()
+    print(f"{_prefix} [bgrl] precomputing frozen graph embeddings (train) ...")
+    train_embeds, train_labels = _precompute_graph_embeddings_bgrl(
+        encoder, train_loader, device,
+    )
+    print(f"{_prefix}   train: {train_embeds.shape[0]} graphs, dim={train_embeds.shape[1]}")
+
+    print(f"{_prefix} [bgrl] precomputing frozen graph embeddings (valid) ...")
+    valid_embeds, valid_labels = _precompute_graph_embeddings_bgrl(
+        encoder, valid_loader, device,
+        max_batches=graph_eval_config.max_eval_batches,
+        debug=graph_eval_config.debug,
+    )
+    print(f"{_prefix}   valid: {valid_embeds.shape[0]} graphs")
+
+    print(f"{_prefix} [bgrl] precomputing frozen graph embeddings (test) ...")
+    test_embeds, test_labels = _precompute_graph_embeddings_bgrl(
+        encoder, test_loader, device,
+        max_batches=graph_eval_config.max_eval_batches,
+        debug=graph_eval_config.debug,
+    )
+    _embed_elapsed = _time.time() - _t0
+    print(
+        f"{_prefix}   test: {test_embeds.shape[0]} graphs  "
+        f"(precompute total: {_embed_elapsed:.1f}s)"
+    )
+
+    # Move cached embeddings to training device; free encoder from GPU.
+    train_embeds = train_embeds.to(device)
+    train_labels = train_labels.to(device)
+    valid_embeds = valid_embeds.to(device)
+    valid_labels = valid_labels.to(device)
+    test_embeds = test_embeds.to(device)
+    test_labels = test_labels.to(device)
+    encoder.cpu()
+    if device != "cpu":
+        torch.cuda.empty_cache()
+
+    # ------------------------------------------------------------------
+    # Train linear head on cached graph embeddings
+    # ------------------------------------------------------------------
+    hidden_dim = int(train_embeds.shape[1])
+    head = GraphHead(hidden_dim=hidden_dim, num_classes=int(num_classes)).to(device)
+    optimizer = torch.optim.Adam(head.parameters(), lr=GRAPH_LR)
+
+    effective_ft_epochs = (
+        graph_eval_config.ft_epochs
+        if graph_eval_config.ft_epochs is not None
+        else GRAPH_EPOCHS
+    )
+    eval_every = graph_eval_config.graph_eval_every
+    batch_size = graph_eval_config.batch_size
+
+    best_valid = float("-inf")
+    best_state = None
+    train_steps = 0
+    stop_training = False
+    n_train = train_embeds.shape[0]
+
+    _t_train = _time.time()
+    for epoch in range(effective_ft_epochs):
+        head.train()
+        perm = torch.randperm(n_train, device=train_embeds.device)
+        for start in range(0, n_train, batch_size):
+            idx = perm[start : start + batch_size]
+            logits = head.linear(train_embeds[idx])
+            loss = _masked_bce_loss(logits, train_labels[idx])
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_steps += 1
+
+            if (
+                graph_eval_config.max_train_steps is not None
+                and train_steps >= graph_eval_config.max_train_steps
+            ):
+                print(
+                    f"{_prefix} max_train_steps reached: "
+                    f"stopping after {graph_eval_config.max_train_steps} optimizer step(s)."
+                )
+                stop_training = True
+                break
+
+        is_last = (epoch == effective_ft_epochs - 1) or stop_training
+        should_eval = is_last or eval_every is None or ((epoch + 1) % eval_every == 0)
+
+        if should_eval:
+            head.eval()
+            with torch.no_grad():
+                valid_logits = head.linear(valid_embeds)
+            valid_ap = _evaluate_pcba_from_logits(
+                valid_logits, valid_labels, evaluator, "valid",
+            )
+            if valid_ap >= best_valid:
+                best_valid = valid_ap
+                best_state = copy.deepcopy(head.state_dict())
+
+        if stop_training:
+            break
+
+    # Final test AP
+    head.load_state_dict(_select_best_state(best_state, head))
+    head.eval()
+    with torch.no_grad():
+        test_logits = head.linear(test_embeds)
+    best_test = _evaluate_pcba_from_logits(
+        test_logits, test_labels, evaluator, "test",
+    )
+
+    _train_elapsed = _time.time() - _t_train
+    _total_elapsed = _time.time() - _t0
+    print(
+        f"{_prefix} bgrl graph eval done: {train_steps} steps in {_train_elapsed:.1f}s, "
+        f"best_valid_ap={best_valid:.6f}, test_ap={best_test:.6f}  "
+        f"(total wall: {_total_elapsed:.1f}s)"
+    )
+
+    eval_cadence_note = (
+        f" graph_eval_every={eval_every}," if eval_every is not None else ""
+    )
+    return EvalResult(
+        model="bgrl",
+        dataset="ogbg-molpcba",
+        task="graph",
+        status=_eval_status(graph_eval_config.debug),
+        metric_name="ap",
+        metric_value=float(best_test),
+        notes=format_debug_notes(graph_eval_config)
+        if graph_eval_config.debug
+        else (
+            "Frozen BGRL encoder (node-level SSL) with mean-pool linear graph head; "
+            "graph embeddings precomputed once under torch.no_grad(); "
+            f"ft_epochs={effective_ft_epochs},{eval_cadence_note} "
+            "AP via official ogbg-molpcba OGB evaluator on official splits; "
+            "node_ssl_graph_transfer=true; edge_features_ignored=true"
         ),
     )
 
@@ -1017,7 +1394,7 @@ def run_graph_eval(
 ) -> EvalResult:
     """Run graph classification linear-probe evaluation.
 
-    Currently supports GraphMAE on ogbg-molpcba only.
+    Supports GraphMAE and BGRL on ogbg-molpcba.
     """
     adapter = REGISTRY.get_adapter("ogbg-molpcba")
     adapter.validate_model(model)
@@ -1029,10 +1406,12 @@ def run_graph_eval(
         return _run_graph_eval_graphmae(
             encoder, device, graph_eval_config, feat_pt=feat_pt,
         )
+    if model == "bgrl":
+        return _run_graph_eval_bgrl(
+            encoder, device, graph_eval_config, feat_pt=feat_pt,
+        )
     raise NotImplementedError(
-        f"Graph-level eval for model={model!r} is not supported. "
-        "BGRL is a node-level SSL method; graph classification requires GraphMAE "
-        "(trained via repos/graphmae/main_graph.py on ogbg-molpcba)."
+        f"Graph-level eval for model={model!r} is not supported."
     )
 
 
@@ -1230,9 +1609,32 @@ def _encode_link_graphmae(
         return encoder(graph, features).detach().cpu()
 
 
+def _encode_link_bgrl(
+    encoder,
+    device: str,
+    dataset_name: str,
+    *,
+    feat_pt: str | None = None,
+):
+    """Load a link dataset graph via BGRL/PyG loader, encode nodes, return [N, dim] on CPU."""
+    with _bgrl_context():
+        data_module = _load_module_from_path("_gfm_safety_bgrl_data", BGRL_ROOT / "data.py")
+        dataset = data_module.Dataset(root=str(REPO_ROOT / "data"), name=dataset_name)[0]
+
+    if feat_pt is not None:
+        dataset.x = _load_feat_pt(feat_pt, dataset.num_nodes)
+
+    dataset = dataset.to(device)
+    _validate_feature_dim(encoder, dataset.x.shape[1], feat_pt is not None, dataset_name)
+
+    with torch.no_grad():
+        return encoder(dataset.x, dataset.edge_index, dataset.edge_attr).detach().cpu()
+
+
 # Link node encoding dispatch — keyed by (model, dataset_name)
 _LINK_ENCODE: dict[str, callable] = {
     "graphmae": _encode_link_graphmae,
+    "bgrl": _encode_link_bgrl,
 }
 
 
@@ -1245,6 +1647,8 @@ def run_link_eval(
     feat_pt: str | None = None,
     scorer_name: str = "dot_product",
     ranking_protocol: RankingProtocol | None = None,
+    scorer_eval_every: int | None = None,
+    scorer_patience: int | None = None,
 ) -> EvalResult:
     """Link-prediction evaluation via generalized protocol-based runner.
 
@@ -1327,7 +1731,14 @@ def run_link_eval(
     scorer = get_scorer(scorer_name, **scorer_kwargs)
     relation_types_ignored = not scorer.info.relation_aware
 
-    # -- 4.5. Train scorer if it has learnable parameters --
+    # -- 4.5. Build filter sets (needed for both scorer validation and final eval) --
+    head_to_tails, tail_to_heads = build_filter_sets(
+        protocol.train_edges,
+        protocol.valid_edges,
+        protocol.test_edges,
+    )
+
+    # -- 4.6. Train scorer if it has learnable parameters --
     scorer_train_meta: dict[str, object] | None = None
     if scorer.needs_training:
         scorer_train_epochs = 100
@@ -1351,11 +1762,17 @@ def run_link_eval(
             epochs=scorer_train_epochs,
             debug=debug,
             max_train_steps=scorer_max_steps,
+            eval_every=scorer_eval_every,
+            patience=scorer_patience,
+            valid_edges=protocol.valid_edges,
+            relation_ids_valid=protocol.relation_ids_valid,
+            filter_head_to_tails=head_to_tails,
+            filter_tail_to_heads=tail_to_heads,
         )
         if debug:
             print(f"[link_eval] scorer training result: {scorer_train_meta}")
 
-    # -- 5. Select test edges and build filter sets --
+    # -- 5. Select test edges --
     test_edge_list = protocol.test_edges
     test_rel_ids = protocol.relation_ids_test
     if debug and len(test_edge_list) > LINK_DEBUG_MAX_TEST_EDGES:
@@ -1372,12 +1789,6 @@ def run_link_eval(
         torch.tensor(test_rel_ids, dtype=torch.long)
         if test_rel_ids is not None and scorer.info.relation_aware
         else None
-    )
-
-    head_to_tails, tail_to_heads = build_filter_sets(
-        protocol.train_edges,
-        protocol.valid_edges,
-        protocol.test_edges,
     )
 
     # -- 6. Compute metrics --
@@ -1428,6 +1839,10 @@ def run_link_eval(
         notes_fields["scorer_train_steps"] = scorer_train_meta["total_steps"]
         notes_fields["scorer_train_loss"] = scorer_train_meta["final_loss"]
         notes_fields["neg_per_pos"] = scorer_train_meta["neg_per_pos"]
+        if "early_stopped" in scorer_train_meta:
+            notes_fields["scorer_early_stopped"] = scorer_train_meta["early_stopped"]
+            notes_fields["scorer_best_valid_mrr"] = scorer_train_meta["best_valid_mrr"]
+            notes_fields["scorer_epochs_at_best_valid"] = scorer_train_meta["epochs_at_best_valid"]
     if debug:
         notes_fields["debug_mode"] = True
         notes_fields["official_metric"] = False

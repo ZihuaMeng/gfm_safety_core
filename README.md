@@ -25,7 +25,7 @@ aliases.
   - The full-local non-debug surface proves non-debug local execution and separated
     checkpoint provenance, but it is still not a locked official result because
     `official_metric=false` and the surface is not an `official_candidate_*` row.
-- WN18RR now has execution-backed experimental compare artifacts:
+- WN18RR is included in `all_proven_local` with execution-backed evidence (via legacy group `wn18rr_experimental_compare`):
   - Structural alignment audit: `success`, `13/13 checks`, `num_entities=40943`,
     evidence: `results/baseline/wn18rr_alignment_audit.json`
   - Semantic alignment audit: `success`, `verdict=verified_by_provenance`, evidence:
@@ -36,10 +36,10 @@ aliases.
   - Full-scale relation-aware link eval: `success`, `mrr=0.000515`,
     `hits@10=0.000479`, evidence:
     `results/baseline/layer2_suite_wn18rr_experimental_compare_official_manifest.json`
-  - The newer comparison and audit artifacts clear the old semantic-alignment,
-    negative-sampling-contract, and official-metric blockers, but WN18RR remains
-    fenced from `official_candidate_*` / `all_proven_local` because
-    `experimental_fence_still_enabled`.
+  - The comparison and audit artifacts have cleared all technical blockers
+    (semantic-alignment, negative-sampling-contract, official-metric).
+    WN18RR is now included in `all_proven_local`. Baseline dot-product path
+    retains `relation_types_ignored=true`; relation-aware path clears all blockers.
 
 ## Evidence Priority
 

@@ -1,4 +1,5 @@
 import contextlib
+import os
 
 import torch
 from torch_geometric.data import Data, InMemoryDataset
@@ -177,10 +178,111 @@ def download_ogb_data(config):
     return root, name, data_dir
 
 
+_PCBA_MAX_TRAIN_GRAPHS = int(os.environ.get("BGRL_PCBA_MAX_GRAPHS", "10000"))
+
+
+def download_ogb_graph_data(config):
+    """Prepare an OGB graph-property-prediction dataset for BGRL's single-graph training.
+
+    BGRL operates on a single large graph.  For graph-level datasets like
+    ogbg-molpcba, this function creates a **union graph** by concatenating a
+    configurable number of training-split molecular graphs into one
+    disconnected graph (block-diagonal adjacency).
+
+    The node features are the native OGB atom features (9-dim for PCBA).
+    Edge attributes are replaced with ones (1-D) because BGRL's GCNConv
+    expects scalar edge weights, not multi-dimensional bond features.
+
+    Dummy node labels and masks are created so BGRL's Dataset.process()
+    contract is satisfied.  BGRL's built-in logreg evaluation is skipped
+    for graph datasets (--skip-eval).
+
+    Max molecules: controlled by BGRL_PCBA_MAX_GRAPHS env var (default 10000).
+    """
+    root = config["kwargs"]["root"]
+    name = config["kwargs"]["name"]
+
+    max_graphs = _PCBA_MAX_TRAIN_GRAPHS
+    data_dir = osp.join(root, f"bgrl_{name}_n{max_graphs}")
+    dst_path = osp.join(data_dir, "raw", "data.pt")
+
+    if not osp.exists(dst_path):
+        print(f"  [OGB-graph] Building BGRL union-graph cache for {name!r} "
+              f"(max_graphs={max_graphs}) -> {dst_path!r} ...")
+        from ogb.graphproppred import PygGraphPropPredDataset
+
+        try:
+            dataset = PygGraphPropPredDataset(name=name, root=root)
+        except Exception as exc:
+            if not _is_weights_only_error(exc):
+                raise
+            print("[WARN] OGB cache load failed (weights_only); retrying with patch.")
+            with _torch_load_weights_only_false():
+                dataset = PygGraphPropPredDataset(name=name, root=root)
+
+        split_idx = dataset.get_idx_split()
+        train_indices = split_idx["train"]
+
+        # Subsample training molecules if needed
+        if len(train_indices) > max_graphs:
+            perm = torch.randperm(len(train_indices))[:max_graphs]
+            train_indices = train_indices[perm].sort().values
+
+        # Build union graph from selected training molecules
+        all_x = []
+        all_edge_index = []
+        node_offset = 0
+
+        for i, idx in enumerate(train_indices):
+            mol = dataset[int(idx)]
+            n_nodes = mol.x.shape[0]
+            all_x.append(mol.x.float())
+            if mol.edge_index is not None and mol.edge_index.numel() > 0:
+                all_edge_index.append(mol.edge_index + node_offset)
+            node_offset += n_nodes
+            if (i + 1) % 2000 == 0:
+                print(f"  [OGB-graph]   processed {i + 1}/{len(train_indices)} molecules "
+                      f"({node_offset:,} nodes so far)")
+
+        union_x = torch.cat(all_x, dim=0)
+        union_edge_index = (
+            torch.cat(all_edge_index, dim=1) if all_edge_index
+            else torch.zeros((2, 0), dtype=torch.long)
+        )
+        # 1-D edge weights (BGRL GCNConv contract)
+        union_edge_attr = torch.ones(union_edge_index.shape[1], dtype=torch.float32)
+
+        # Dummy labels and masks for BGRL compatibility
+        num_nodes = union_x.shape[0]
+        union_y = torch.zeros(num_nodes, dtype=torch.long)
+        node_mask = torch.ones(num_nodes, dtype=torch.bool)
+        masks_2d = node_mask.unsqueeze(0).expand(20, -1).clone()
+
+        graph_data = Data(
+            x=union_x,
+            edge_index=union_edge_index,
+            edge_attr=union_edge_attr,
+            y=union_y,
+            train_mask=masks_2d,
+            val_mask=masks_2d.clone(),
+            test_mask=masks_2d.clone(),
+            num_nodes=num_nodes,
+        )
+
+        utils.create_dirs([osp.join(data_dir, "raw")])
+        torch.save((graph_data, None), dst_path)
+        print(f"  [OGB-graph] Saved union graph: {num_nodes:,} nodes, "
+              f"{union_edge_index.shape[1]:,} edges, feat_dim={union_x.shape[1]}, "
+              f"molecules={len(train_indices)}")
+
+    return root, name, data_dir
+
+
 def download_data(root, name):
     """
     Download data from different repositories.
-    Supports PyTorch Geometric datasets (src='pyg') and OGB node datasets (src='ogb').
+    Supports PyTorch Geometric datasets (src='pyg'), OGB node datasets (src='ogb'),
+    and OGB graph datasets (src='ogb_graph').
     :param root: The root directory of the dataset
     :param name: The name of the dataset
     :return:
@@ -190,6 +292,8 @@ def download_data(root, name):
         return download_pyg_data(config)
     elif config["src"] == "ogb":
         return download_ogb_data(config)
+    elif config["src"] == "ogb_graph":
+        return download_ogb_graph_data(config)
 
 
 class Dataset(InMemoryDataset):

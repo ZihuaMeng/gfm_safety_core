@@ -116,16 +116,24 @@ class ModelTrainer:
         self._optimizer = optim.AdamW(params=self._model.parameters(), lr=args.lr, weight_decay= 1e-5)
         # learning rate
         scheduler = lambda epoch: epoch / 1000 if epoch < 1000 \
-                    else ( 1 + np.cos((epoch-1000) * np.pi / (self._args.epochs - 1000))) * 0.5
+                    else ( 1 + np.cos((epoch-1000) * np.pi / max(1, self._args.epochs - 1000))) * 0.5
         self._scheduler = optim.lr_scheduler.LambdaLR(self._optimizer, lr_lambda = scheduler)
 
     def _skip_eval(self) -> bool:
         """Return True when training-time node evaluation is intentionally disabled."""
-        return self._args.name.lower() == "wn18rr" or getattr(self._args, "skip_eval", False)
+        name = self._args.name.lower()
+        return (
+            name == "wn18rr"
+            or name in ("pcba", "ogbg-molpcba")
+            or getattr(self._args, "skip_eval", False)
+        )
 
     def _skip_eval_message(self) -> str:
-        if self._args.name.lower() == "wn18rr":
+        name = self._args.name.lower()
+        if name == "wn18rr":
             return "[{}] Evaluation skipped - not a node-classification dataset.".format(self._args.name)
+        if name in ("pcba", "ogbg-molpcba"):
+            return "[{}] Evaluation skipped - graph-level dataset (eval via eval/run_lp.py).".format(self._args.name)
         return "[{}] Evaluation skipped (--skip-eval).".format(self._args.name)
 
     def train(self):
@@ -279,12 +287,20 @@ def train_eval(args):
         _hidden = int(args.layers[-1])
         _input_dim = int(trainer._dataset.x.shape[1])
         _dataset_name = utils.decide_config(root=args.root, name=args.name)["name"]
+        # Infer task_type from dataset name
+        _name_lower = args.name.lower()
+        if _name_lower == "wn18rr":
+            _task_type = "link"
+        elif _name_lower in ("pcba", "ogbg-molpcba"):
+            _task_type = "graph"
+        else:
+            _task_type = "node"
         export_encoder_checkpoint(
             _enc_sd,
             args.export_encoder_ckpt,
             model_name="bgrl",
             dataset=_dataset_name,
-            task_type="node",
+            task_type=_task_type,
             hidden_dim=_hidden,
             encoder_input_dim=_input_dim,
             backend="pyg",

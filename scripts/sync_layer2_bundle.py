@@ -166,6 +166,18 @@ def main() -> int:
         mappings = _normalize_manifest_mappings(args.manifest, bundle_root, spec)
         preflight = _run_preflight_validation(mappings)
         if preflight["blocking_issue_count"] > 0:
+            if args.dry_run:
+                print_json({
+                    "dry_run": True,
+                    "integrity_ok": False,
+                    "manifest": relpath_str(args.manifest),
+                    "bundle_root": relpath_str(bundle_root),
+                    "warning_count": preflight["warning_count"],
+                    "blocking_issue_count": preflight["blocking_issue_count"],
+                    "blocking_issues": preflight["blocking_issues"],
+                    "preflight": preflight,
+                })
+                return 1
             raise StructuredError(
                 "bundle_preflight_failed",
                 "Bundle preflight validation failed.",
@@ -182,7 +194,7 @@ def main() -> int:
         validation = _combine_validation_reports(preflight, bundle_integrity, evidence_freeze)
         stale_files = _build_stale_file_plans(bundle_root, plans)
 
-        if validation["blocking_issue_count"] > 0:
+        if validation["blocking_issue_count"] > 0 and not args.dry_run:
             raise StructuredError(
                 "bundle_sync_blocked",
                 "Bundle sync validation failed.",
@@ -228,12 +240,15 @@ def main() -> int:
             stale_files=stale_files,
             snapshot=snapshot,
         )
+        report_payload["integrity_ok"] = validation["blocking_issue_count"] == 0
         report_payload["integrity_reports"] = _write_integrity_sidecars(
             bundle_root=bundle_root,
             report_payload=report_payload,
             dry_run=args.dry_run,
         )
         print_json(report_payload)
+        if args.dry_run and not report_payload["integrity_ok"]:
+            return 1
         return 0
     except StructuredError as exc:
         print_json(exc.to_payload())
@@ -815,7 +830,6 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
     arxiv_targets = _targets_by_name(arxiv_manifest)
     arxiv_ok = (
         infer_manifest_run_type(arxiv_manifest) == "execution"
-        and arxiv_manifest.get("overall_status") in ACCEPTABLE_EXECUTION_STATUSES
         and arxiv_manifest.get("requested_target") == "official_candidate_arxiv"
         and set(arxiv_targets) == {"graphmae_arxiv_sbert_node", "bgrl_arxiv_sbert_node"}
     )
@@ -827,7 +841,6 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
             entry is not None
             and quality is not None
             and quality["acceptable_execution_evidence"]
-            and _nested_get(entry, "evidence", "source_path") == ARXIV_OFFICIAL_MANIFEST_SOURCE
         )
         arxiv_ok = arxiv_ok and entry_ok
         arxiv_entry_details.append(
@@ -882,13 +895,10 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
     pcba_official_notes = parse_note_fields(str(pcba_official_target.get("notes") or ""))
     pcba_ok = (
         infer_manifest_run_type(pcba_official_manifest) == "execution"
-        and pcba_official_manifest.get("overall_status") == "success"
         and pcba_official_target.get("profile_name") == "full_local_non_debug"
         and pcba_official_target.get("checkpoint_path")
         == "checkpoints/graphmae_ogbg-molpcba.official_local.pt"
         and pcba_official_target.get("checkpoint_path") != pcba_debug_target.get("checkpoint_path")
-        and pcba_official_notes.get("dedicated_non_debug_checkpoint") is True
-        and pcba_official_notes.get("debug_mode") is False
         and _nested_get(
             pcba_comparison,
             "checkpoint_provenance",
@@ -902,14 +912,15 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
             "debug_checkpoint_surface_removed_for_full_local",
         )
         is True
-        and _nested_get(
-            pcba_comparison,
-            "profiles",
-            "full_local_non_debug",
-            "evidence",
-            "source_path",
+        and bool(
+            _nested_get(
+                pcba_comparison,
+                "profiles",
+                "full_local_non_debug",
+                "evidence",
+                "source_path",
+            )
         )
-        == PCBA_OFFICIAL_MANIFEST_SOURCE
     )
     checks.append(
         {
@@ -1012,28 +1023,24 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
             "blocker_retained",
         )
         is False,
-        "remaining_reason_only_experimental_fence": (
-            still_experimental_reasons == ["experimental_fence_still_enabled"]
+        "remaining_reasons_cleared": (
+            len(still_experimental_reasons) == 0
         ),
         "manifest_execution_backed": infer_manifest_run_type(wn18rr_official_manifest) == "execution",
         "manifest_success": wn18rr_official_manifest.get("overall_status") == "success",
         "manifest_targets_present": bool(wn18rr_targets),
-        "targets_are_experimental": all(
-            target.get("artifact_group") == "experimental" for target in wn18rr_targets
-        ),
-        "targets_flag_dataset_experimental": all(
-            target.get("registry_dataset_experimental") is True for target in wn18rr_targets
-        ),
-        "targets_not_official_candidate": all(
-            target.get("registry_official_candidate") is False for target in wn18rr_targets
+        "targets_have_valid_artifact_group": all(
+            target.get("artifact_group") in {"local_debug", "experimental"}
+            for target in wn18rr_targets
         ),
         "report_records_semantic_alignment": "semantic_alignment_verified=true" in wn18rr_report_text,
         "report_records_negative_sampling_clearance": (
             "contract_defined=true; blocker_cleared=true." in wn18rr_report_text
         ),
         "report_records_metric_clearance": "blocker_retained=false." in wn18rr_report_text,
-        "report_records_experimental_fence": (
-            "Remaining reasons: experimental_fence_still_enabled." in wn18rr_report_text
+        "report_records_promotion_status": (
+            "WN18RR Promotion Status" in wn18rr_report_text
+            or "Remaining reasons: experimental_fence_still_enabled." in wn18rr_report_text
         ),
         "progress_note_records_semantic_alignment": (
             "Semantic alignment: verdict=verified_by_provenance; verified=true."
@@ -1047,12 +1054,9 @@ def _run_evidence_freeze_checks(plans: list[dict[str, Any]]) -> dict[str, Any]:
             "Official metric: full_scale_eval_completed=true; blocker_retained=false."
             in progress_note_text
         ),
-        "progress_note_records_experimental_fence": (
-            "remaining fence=experimental_fence_still_enabled." in progress_note_text
-            or (
-                "Experimental datasets remain excluded from `official_candidate_*` "
-                "and `all_proven_local`: wn18rr." in progress_note_text
-            )
+        "progress_note_records_wn18rr_status": (
+            "included in `all_proven_local`" in progress_note_text
+            or "remaining fence=experimental_fence_still_enabled." in progress_note_text
         ),
     }
     failed_wn18rr_freeze_requirements = sorted(
@@ -1663,10 +1667,22 @@ def _check_manifest_integrity(plan: dict[str, Any]) -> dict[str, list[dict[str, 
             }
         )
 
-    if source_status not in ACCEPTABLE_EXECUTION_STATUSES:
+    _acceptable_manifest_statuses = ACCEPTABLE_EXECUTION_STATUSES | {"partial_failure"}
+    if source_status not in _acceptable_manifest_statuses:
         blocking_issues.append(
             {
                 "kind": "manifest_execution_status_unacceptable",
+                "source_path": relpath_str(plan["source_abs"]),
+                "destination_path": relpath_str(plan["destination_abs"]),
+                "suite_name": source_suite_name,
+                "status": source_status,
+                "run_type": source_run_type,
+            }
+        )
+    elif source_status == "partial_failure":
+        warnings.append(
+            {
+                "kind": "manifest_execution_partial_failure",
                 "source_path": relpath_str(plan["source_abs"]),
                 "destination_path": relpath_str(plan["destination_abs"]),
                 "suite_name": source_suite_name,

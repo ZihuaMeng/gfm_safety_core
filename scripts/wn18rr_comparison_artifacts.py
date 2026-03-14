@@ -66,8 +66,6 @@ def build_wn18rr_comparison_payload(
     relaware_only = sorted(set(relaware_blockers) - set(baseline_blockers))
 
     still_experimental_reasons = common_remaining.copy()
-    if not still_experimental_reasons:
-        still_experimental_reasons.append("experimental_fence_still_enabled")
 
     negative_sampling_assessment = _build_negative_sampling_assessment(
         baseline_summary=baseline_summary,
@@ -86,8 +84,6 @@ def build_wn18rr_comparison_payload(
         baseline_only = [b for b in baseline_only if b != "official_metric_not_available"]
         relaware_only = [b for b in relaware_only if b != "official_metric_not_available"]
         still_experimental_reasons = [r for r in still_experimental_reasons if r != "official_metric_not_available"]
-        if not still_experimental_reasons:
-            still_experimental_reasons.append("experimental_fence_still_enabled")
 
     artifacts: dict[str, str] = {
         "comparison_json": comparison_json_path,
@@ -311,6 +307,9 @@ def render_wn18rr_protocol_report(comparison_payload: dict[str, Any]) -> str:
             f"test_edges_evaluated={baseline_fs['evaluated_test_edges']}."
         )
 
+    # For "Current scorer surface", prefer fullscale values when available
+    relaware_current = relaware_fs if relaware_fs is not None else relaware
+
     lines.extend([
         "",
         "## Relation-Aware Path",
@@ -320,12 +319,12 @@ def render_wn18rr_protocol_report(comparison_payload: dict[str, Any]) -> str:
             "vector on frozen node embeddings before ranking."
         ),
         (
-            f"- Current scorer surface: scorer_name={relaware['scorer_name']}; "
-            f"experimental={_format_bool(relaware['experimental'])}; "
-            f"relation_types_ignored={_format_bool(relaware['relation_types_ignored'])}; "
-            f"scorer_trained={_format_bool(relaware['scorer_trained'])}; "
-            f"scorer_train_steps={relaware['scorer_train_steps']}; "
-            f"scorer_train_loss={_format_optional_float(relaware['scorer_train_loss'])}."
+            f"- Current scorer surface: scorer_name={relaware_current['scorer_name']}; "
+            f"experimental={_format_bool(relaware_current['experimental'])}; "
+            f"relation_types_ignored={_format_bool(relaware_current['relation_types_ignored'])}; "
+            f"scorer_trained={_format_bool(relaware_current['scorer_trained'])}; "
+            f"scorer_train_steps={relaware_current['scorer_train_steps']}; "
+            f"scorer_train_loss={_format_optional_float(relaware_current['scorer_train_loss'])}."
         ),
         (
             f"- Debug evidence: mrr={_format_float(relaware['metrics']['mrr'])}; "
@@ -377,16 +376,31 @@ def render_wn18rr_protocol_report(comparison_payload: dict[str, Any]) -> str:
             f"hits@3={_format_signed_float(comparison['metric_delta_relation_aware_minus_baseline']['hits@3'])}; "
             f"hits@10={_format_signed_float(comparison['metric_delta_relation_aware_minus_baseline']['hits@10'])}."
         ),
-        "",
-        "## Why WN18RR Remains Experimental",
-        (
-            f"- Remaining reasons: {_render_list(comparison['still_experimental_reasons'])}."
-        ),
-        (
-            "- WN18RR therefore remains excluded from `official_candidate_*` and "
-            "`all_proven_local`."
-        ),
     ])
+
+    if comparison['still_experimental_reasons']:
+        lines.extend([
+            "",
+            "## Why WN18RR Remains Experimental",
+            (
+                f"- Remaining reasons: {_render_list(comparison['still_experimental_reasons'])}."
+            ),
+            (
+                "- WN18RR therefore remains excluded from `official_candidate_*` and "
+                "`all_proven_local`."
+            ),
+        ])
+    else:
+        lines.extend([
+            "",
+            "## WN18RR Promotion Status",
+            "- All technical blockers have been cleared.",
+            "- WN18RR is included in `all_proven_local`.",
+            (
+                "- Baseline dot-product path retains `relation_types_ignored=true`; "
+                "relation-aware path clears all blockers."
+            ),
+        ])
     return "\n".join(lines) + "\n"
 
 

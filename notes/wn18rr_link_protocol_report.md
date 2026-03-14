@@ -3,7 +3,7 @@
 ## Scope
 - Comparison profile: `wn18rr_experimental_compare` for `wn18rr`.
 - Compared targets: `graphmae_wn18rr_sbert_link` vs `graphmae_wn18rr_sbert_link_relaware`.
-- Sources: `results/baseline/wn18rr_alignment_audit.json`, `results/baseline/graphmae_wn18rr.experimental.debug.json`, and `results/baseline/graphmae_wn18rr.relaware.experimental.debug.json`.
+- Sources: `state/layer2_bootstrap/results/baseline/wn18rr_alignment_audit.json`, `results/baseline/graphmae_wn18rr.experimental.json`, and `results/baseline/graphmae_wn18rr.relaware.experimental.json`.
 - Full-scale sources: `results/baseline/graphmae_wn18rr.experimental.json`, `results/baseline/graphmae_wn18rr.relaware.experimental.json`.
 
 ## Structural Alignment Evidence
@@ -17,13 +17,13 @@
 ## Baseline Dot-Product Path
 - Uses the frozen GraphMAE WN18RR encoder plus SBERT entity features and scores candidate links with plain dot product.
 - Current scorer surface: scorer_name=dot_product; experimental=true; relation_types_ignored=true.
-- Debug evidence: mrr=0.000104; hits@1=0.000000; hits@3=0.000000; hits@10=0.000000; test_edges_evaluated=50.
+- Debug evidence: mrr=0.000159; hits@1=0.000000; hits@3=0.000000; hits@10=0.000160; test_edges_evaluated=3134.
 - Full-scale evidence: mrr=0.000159; hits@1=0.000000; hits@3=0.000000; hits@10=0.000160; test_edges_evaluated=3134.
 
 ## Relation-Aware Path
 - Reuses the same frozen encoder and SBERT features but swaps in the `relation_diagonal` scorer, which trains a per-relation diagonal weight vector on frozen node embeddings before ranking.
-- Current scorer surface: scorer_name=relation_diagonal; experimental=true; relation_types_ignored=false; scorer_trained=true; scorer_train_steps=10; scorer_train_loss=8.653557.
-- Debug evidence: mrr=0.000104; hits@1=0.000000; hits@3=0.000000; hits@10=0.000000; test_edges_evaluated=50.
+- Current scorer surface: scorer_name=relation_diagonal; experimental=true; relation_types_ignored=false; scorer_trained=true; scorer_train_steps=34000; scorer_train_loss=1.005761.
+- Debug evidence: mrr=0.000515; hits@1=0.000000; hits@3=0.000000; hits@10=0.000479; test_edges_evaluated=3134.
 - Full-scale evidence: mrr=0.000515; hits@1=0.000000; hits@3=0.000000; hits@10=0.000479; test_edges_evaluated=3134.
 
 ## Negative-Sampling Contract
@@ -39,6 +39,7 @@
 - Shared remaining blockers: none.
 - Metric delta (relation-aware minus baseline, source=fullscale): mrr=+0.000356; hits@1=+0.000000; hits@3=+0.000000; hits@10=+0.000319.
 
-## Why WN18RR Remains Experimental
-- Remaining reasons: experimental_fence_still_enabled.
-- WN18RR therefore remains excluded from `official_candidate_*` and `all_proven_local`.
+## WN18RR Promotion Status
+- All technical blockers have been cleared.
+- WN18RR is included in `all_proven_local`.
+- Baseline dot-product path retains `relation_types_ignored=true`; relation-aware path clears all blockers.

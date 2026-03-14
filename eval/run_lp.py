@@ -60,6 +60,10 @@ def _resolve_graph_eval_config(args: argparse.Namespace) -> GraphEvalConfig:
         raise ValueError("--max_train_steps must be >= 0.")
     if args.max_eval_batches is not None and args.max_eval_batches < 0:
         raise ValueError("--max_eval_batches must be >= 0.")
+    if args.ft_epochs is not None and args.ft_epochs <= 0:
+        raise ValueError("--ft_epochs must be > 0.")
+    if args.graph_eval_every is not None and args.graph_eval_every <= 0:
+        raise ValueError("--graph_eval_every must be > 0.")
 
     batch_size = (
         args.batch_size
@@ -74,6 +78,8 @@ def _resolve_graph_eval_config(args: argparse.Namespace) -> GraphEvalConfig:
         num_workers=num_workers,
         max_train_steps=_normalize_optional_cap(args.max_train_steps),
         max_eval_batches=_normalize_optional_cap(args.max_eval_batches),
+        ft_epochs=args.ft_epochs,
+        graph_eval_every=args.graph_eval_every,
     )
 
 
@@ -103,6 +109,31 @@ def parse_args() -> argparse.Namespace:
                             "Options: dot_product (default), relation_diagonal. "
                             "relation_diagonal trains a per-relation diagonal scorer "
                             "on frozen node embeddings before evaluation."
+                        ))
+    parser.add_argument("--ft_epochs", type=int, default=None,
+                        help=(
+                            "Override finetune (linear head training) epochs for graph eval. "
+                            "If omitted, uses the default from GraphTaskRunner (currently 20)."
+                        ))
+    parser.add_argument("--graph_eval_every", type=int, default=None,
+                        help=(
+                            "For graph eval: validate every N epochs instead of every "
+                            "epoch. Always validates on the final epoch. Reduces wall "
+                            "time when ft_epochs is large. If omitted, validates every "
+                            "epoch (original behavior)."
+                        ))
+    parser.add_argument("--eval_every", type=int, default=None,
+                        help=(
+                            "Evaluate link scorer on valid set every N epochs during "
+                            "scorer training. Enables validation-based early stopping "
+                            "when combined with --patience. Only affects link eval with "
+                            "trainable scorers (e.g. relation_diagonal)."
+                        ))
+    parser.add_argument("--patience", type=int, default=None,
+                        help=(
+                            "Early stopping patience for link scorer training: stop if "
+                            "valid MRR does not improve for this many epochs. "
+                            "Requires --eval_every to be set."
                         ))
     return parser.parse_args()
 
@@ -166,6 +197,8 @@ def main() -> None:
                 debug=graph_eval_config.debug,
                 feat_pt=args.feat_pt,
                 scorer_name=link_scorer,
+                scorer_eval_every=args.eval_every,
+                scorer_patience=args.patience,
             )
         else:
             raise ValueError(f"Unhandled task: {task}")

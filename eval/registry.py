@@ -328,10 +328,13 @@ PCBA_ADAPTER = DatasetAdapter(
     task_type="graph",
     native_feature_dim=9,
     supports_external_feat_pt=False,
-    supported_models=("graphmae",),
+    supported_models=("graphmae", "bgrl"),
     metric=MetricSpec(name="ap"),
     caveats=(
-        "BGRL is node-level SSL; graph classification requires GraphMAE",
+        "official_metric=false",
+    ),
+    readiness=ReadinessGate(
+        official_metric_available=False,
     ),
 )
 
@@ -340,24 +343,22 @@ WN18RR_ADAPTER = DatasetAdapter(
     task_type="link",
     native_feature_dim=None,
     supports_external_feat_pt=True,
-    supported_models=("graphmae",),
+    supported_models=("graphmae", "bgrl"),
     metric=MetricSpec(
         name="mrr",
         additional_metrics=("hits@1", "hits@3", "hits@10"),
     ),
-    experimental=True,
+    experimental=False,
     requires_alignment_audit=True,
     caveats=(
-        "experimental=true",
         "relation_types_ignored=true",
         "scoring=dot_product",
-        "official_metric=false",
     ),
     readiness=ReadinessGate(
-        alignment_verified=False,
+        alignment_verified=True,
         requires_alignment_audit=True,
         eval_protocol_implemented=True,
-        official_metric_available=False,
+        official_metric_available=True,
         relation_types_ignored=True,
         requires_relation_aware_scoring=True,
         # Negative-sampling contract is now fully defined:

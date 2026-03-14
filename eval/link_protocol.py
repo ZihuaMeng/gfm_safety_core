@@ -534,6 +534,12 @@ def train_link_scorer(
     batch_size: int = 256,
     debug: bool = False,
     max_train_steps: int | None = None,
+    eval_every: int | None = None,
+    patience: int | None = None,
+    valid_edges: list[tuple[int, int]] | None = None,
+    relation_ids_valid: list[int] | None = None,
+    filter_head_to_tails: dict[int, set[int]] | None = None,
+    filter_tail_to_heads: dict[int, set[int]] | None = None,
 ) -> dict[str, object]:
     """Train a relation-aware link scorer on frozen node embeddings.
 
@@ -557,6 +563,12 @@ def train_link_scorer(
         batch_size:          Mini-batch size
         debug:               Print training progress
         max_train_steps:     Hard cap on gradient steps
+        eval_every:          Evaluate on valid set every N epochs (None = no validation)
+        patience:            Stop if no valid MRR improvement for this many epochs
+        valid_edges:         Validation edges for early stopping evaluation
+        relation_ids_valid:  Parallel relation IDs for valid edges
+        filter_head_to_tails: Pre-built filter set for filtered ranking
+        filter_tail_to_heads: Pre-built filter set for filtered ranking
 
     Returns:
         Dict with training metadata (skipped, epochs_completed, loss, etc.)
@@ -591,6 +603,26 @@ def train_link_scorer(
     total_steps = 0
     best_loss = float("inf")
     final_loss = float("inf")
+
+    # Validation-based early stopping state
+    _do_validation = (
+        eval_every is not None
+        and valid_edges is not None
+        and len(valid_edges) > 0
+        and filter_head_to_tails is not None
+        and filter_tail_to_heads is not None
+    )
+    _valid_edges_t = None
+    _valid_rel_t = None
+    if _do_validation:
+        _valid_edges_t = torch.tensor(valid_edges, dtype=torch.long)
+        if relation_ids_valid is not None and scorer.info.relation_aware:
+            _valid_rel_t = torch.tensor(relation_ids_valid, dtype=torch.long)
+    best_valid_mrr = -1.0
+    epochs_since_improvement = 0
+    epochs_at_best_valid = 0
+    early_stopped = False
+    best_params: list | None = None
 
     for epoch in range(epochs):
         perm = torch.randperm(num_train)
@@ -658,6 +690,39 @@ def train_link_scorer(
                 f"avg_loss={avg_loss:.6f}"
             )
 
+        # Validation-based early stopping
+        if _do_validation and (epoch + 1) % eval_every == 0:
+            with torch.no_grad():
+                valid_metrics = compute_link_metrics(
+                    emb, _valid_edges_t,
+                    filter_head_to_tails, filter_tail_to_heads,
+                    scorer=scorer,
+                    relation_ids=_valid_rel_t,
+                )
+            valid_mrr = valid_metrics["mrr"]
+            if valid_mrr > best_valid_mrr:
+                best_valid_mrr = valid_mrr
+                epochs_since_improvement = 0
+                best_params = [p.data.clone() for p in scorer.parameters()]
+                epochs_at_best_valid = epoch + 1
+            else:
+                epochs_since_improvement += eval_every
+            if debug:
+                print(
+                    f"[scorer_train] epoch {epoch + 1}: "
+                    f"valid_mrr={valid_mrr:.6f}, best={best_valid_mrr:.6f}, "
+                    f"no_improve={epochs_since_improvement}"
+                )
+            if patience is not None and epochs_since_improvement >= patience:
+                early_stopped = True
+                if debug:
+                    print(
+                        f"[scorer_train] early stopping at epoch {epoch + 1}: "
+                        f"no valid MRR improvement for "
+                        f"{epochs_since_improvement} epochs"
+                    )
+                break
+
         if max_train_steps is not None and total_steps >= max_train_steps:
             if debug:
                 print(
@@ -666,7 +731,17 @@ def train_link_scorer(
                 )
             break
 
-    return {
+    # Restore best-validated scorer parameters if validation was performed
+    if best_params is not None:
+        for p, bp in zip(scorer.parameters(), best_params):
+            p.data.copy_(bp)
+        if debug:
+            print(
+                f"[scorer_train] restored best scorer params "
+                f"from epoch {epochs_at_best_valid}"
+            )
+
+    result: dict[str, object] = {
         "skipped": False,
         "epochs_completed": epoch + 1,
         "total_steps": total_steps,
@@ -677,3 +752,10 @@ def train_link_scorer(
         "lr": lr,
         "batch_size": batch_size,
     }
+    if _do_validation:
+        result["eval_every"] = eval_every
+        result["patience"] = patience
+        result["early_stopped"] = early_stopped
+        result["best_valid_mrr"] = round(best_valid_mrr, 6)
+        result["epochs_at_best_valid"] = epochs_at_best_valid
+    return result

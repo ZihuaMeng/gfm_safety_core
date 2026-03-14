@@ -12,7 +12,7 @@ This runbook therefore keeps the current runnable queue and priorities unchanged
 | P0 | `bgrl_arxiv_sbert_node` | Refresh the current BGRL arXiv official-candidate evidence inside the same canonical arXiv suite manifest. |
 | P1 | `graphmae_pcba_native_graph` (`full_local_non_debug`) | Refresh the fuller non-debug local PCBA surface that already backs the current comparison/report flow. |
 
-WN18RR is still excluded from the runnable official/local HPC queue. It remains experimental-only because `experimental_fence_still_enabled`, so it must not be promoted into any `official_candidate_*` surface.
+WN18RR is included in `all_proven_local` with execution-backed evidence. Baseline dot-product path retains `relation_types_ignored=true`; relation-aware path clears all blockers.
 
 ## Fresh-Run Provenance Contract
 
@@ -157,4 +157,4 @@ The ingestion script still prepares or executes the existing artifact refresh pi
 - `scripts/refresh_layer2_artifacts.py`
 - `scripts/sync_layer2_bundle.py`
 
-That preserves the current manifest-backed bundle logic, the current summary/protocol reports, the current target priorities, and the WN18RR experimental-only publication rule.
+That preserves the current manifest-backed bundle logic, the current summary/protocol reports, and the current target priorities. WN18RR is included in `all_proven_local` with execution-backed evidence.

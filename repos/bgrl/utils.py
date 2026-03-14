@@ -156,11 +156,20 @@ def decide_config(root, name):
         root = osp.join(root, "ogb")
         params = {"kwargs": {"root": root, "name": name},
                   "name": name, "src": "ogb"}
+    elif name in ("pcba", "ogbg-molpcba"):
+        # Route ogbg-molpcba through OGB's PygGraphPropPredDataset.
+        # BGRL is a node-level SSL method; PCBA molecules are unioned into a
+        # single disconnected graph for training.  Graph-level classification
+        # happens at eval time via mean-pool + linear head.
+        name = "ogbg-molpcba"
+        root = osp.join(root, "ogb")
+        params = {"kwargs": {"root": root, "name": name},
+                  "name": name, "src": "ogb_graph"}
     else:
         raise Exception(
             f"Unknown dataset name {name}, name has to be one of the following "
             f"'cora', 'citeseer', 'pubmed', 'photo', 'computers', 'cs', 'physics', "
-            f"'wn18rr', 'arxiv' (ogbn-arxiv)")
+            f"'wn18rr', 'arxiv' (ogbn-arxiv), 'pcba' (ogbg-molpcba)")
     return params
 
 

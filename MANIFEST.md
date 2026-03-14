@@ -8,7 +8,7 @@ Stable bundle evidence should use target-specific suite manifests and comparison
 overwritten by the latest executed suite target, so they are not safe as canonical
 cross-target evidence paths.
 
-WN18RR entries in this manifest are copied as experimental evidence only. They must not be promoted into `official_candidate_*` or `all_proven_local`.
+WN18RR entries in this manifest are execution-backed evidence. WN18RR is included in `all_proven_local`. Baseline dot-product path retains `relation_types_ignored=true`.
 
 <!-- layer2-bundle-manifest:start -->
 ```json

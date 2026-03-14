@@ -82,19 +82,112 @@ HPC_TARGET_SPECS: tuple[dict[str, str], ...] = (
     },
 )
 
-EXCLUDED_TARGET_SPECS: tuple[dict[str, str], ...] = (
+PHASE2_HPC_TARGET_SPECS: tuple[dict[str, str], ...] = (
     {
-        "requested_target": "wn18rr_experimental_compare",
+        "plan_id": "graphmae_arxiv_longrun",
+        "launch_id": "phase2_arxiv_longrun",
+        "target_name": "graphmae_arxiv_sbert_node_longrun",
+        "requested_target": "graphmae_arxiv_sbert_node_longrun",
+        "mode": "official",
+        "profile": "longrun",
+        "priority": "P0",
+        "purpose": (
+            "Phase 2 long-run GraphMAE arXiv pretrain=1000, ft=1000, "
+            "lr=0.001, lr_f=0.001."
+        ),
+    },
+    {
+        "plan_id": "graphmae_arxiv_longrun_alt_ft",
+        "launch_id": "phase2_arxiv_longrun_alt_ft",
+        "target_name": "graphmae_arxiv_sbert_node_longrun_alt_ft",
+        "requested_target": "graphmae_arxiv_sbert_node_longrun_alt_ft",
+        "mode": "official",
+        "profile": "longrun_alt_ft",
         "priority": "P2",
-        "classification": "experimental_only",
-        "reason": "experimental_fence_still_enabled",
-        "included_in_runnable_queue": "false",
+        "purpose": (
+            "Phase 2 alt GraphMAE arXiv pretrain=1000, ft=500, "
+            "lr=0.001, lr_f=0.005."
+        ),
+    },
+    {
+        "plan_id": "bgrl_arxiv_longrun",
+        "launch_id": "phase2_bgrl_arxiv_longrun",
+        "target_name": "bgrl_arxiv_sbert_node_longrun",
+        "requested_target": "bgrl_arxiv_sbert_node_longrun",
+        "mode": "official",
+        "profile": "longrun",
+        "priority": "P0",
+        "purpose": (
+            "Phase 2 long-run BGRL arXiv epochs=1000, lr=0.001."
+        ),
+    },
+    {
+        "plan_id": "bgrl_arxiv_longrun_alt_lr",
+        "launch_id": "phase2_bgrl_arxiv_longrun_alt_lr",
+        "target_name": "bgrl_arxiv_sbert_node_longrun_alt_lr",
+        "requested_target": "bgrl_arxiv_sbert_node_longrun_alt_lr",
+        "mode": "official",
+        "profile": "longrun_alt_lr",
+        "priority": "P2",
+        "purpose": (
+            "Phase 2 alt BGRL arXiv epochs=1000, lr=0.0005."
+        ),
+    },
+    {
+        "plan_id": "graphmae_pcba_longrun",
+        "launch_id": "phase2_pcba_longrun",
+        "target_name": "graphmae_pcba_native_graph_longrun",
+        "requested_target": "graphmae_pcba_native_graph_longrun",
+        "mode": "official",
+        "profile": "longrun",
+        "priority": "P1",
+        "purpose": (
+            "Phase 2 long-run GraphMAE PCBA pretrain=100, batch=256, lr=0.001."
+        ),
+    },
+    {
+        "plan_id": "graphmae_pcba_longrun_alt_batch512",
+        "launch_id": "phase2_pcba_longrun_alt_batch512",
+        "target_name": "graphmae_pcba_native_graph_longrun_alt_batch512",
+        "requested_target": "graphmae_pcba_native_graph_longrun_alt_batch512",
+        "mode": "official",
+        "profile": "longrun_alt_batch512",
+        "priority": "P2",
+        "purpose": (
+            "Phase 2 alt GraphMAE PCBA pretrain=100, batch=512, lr=0.001."
+        ),
+    },
+    {
+        "plan_id": "graphmae_wn18rr_relaware_longrun",
+        "launch_id": "phase2_wn18rr_longrun",
+        "target_name": "graphmae_wn18rr_sbert_link_relaware_longrun",
+        "requested_target": "graphmae_wn18rr_sbert_link_relaware_longrun",
+        "mode": "official",
+        "profile": "longrun",
+        "priority": "P1",
+        "purpose": (
+            "Phase 2 long-run WN18RR relation-aware pretrain=500, lr=0.001."
+        ),
+    },
+    {
+        "plan_id": "graphmae_wn18rr_dotprod_longrun",
+        "launch_id": "phase2_wn18rr_longrun_dotprod",
+        "target_name": "graphmae_wn18rr_sbert_link_longrun",
+        "requested_target": "graphmae_wn18rr_sbert_link_longrun",
+        "mode": "official",
+        "profile": "longrun",
+        "priority": "P2",
+        "purpose": (
+            "Phase 2 WN18RR dot-product compare on shared long-run checkpoint."
+        ),
     },
 )
 
+EXCLUDED_TARGET_SPECS: tuple[dict[str, str], ...] = ()
+
 
 def plan_target_specs() -> tuple[dict[str, str], ...]:
-    return HPC_TARGET_SPECS
+    return HPC_TARGET_SPECS + PHASE2_HPC_TARGET_SPECS
 
 
 def excluded_target_specs() -> tuple[dict[str, str], ...]:
@@ -353,6 +446,8 @@ def build_plan_payload(
         },
         "policy_notes": [
             "Stable suite manifests are the ingestion source of truth; do not rely on rolling layer2_suite_official_manifest.json aliases for cross-target evidence.",
-            "WN18RR remains experimental-only and is intentionally excluded from the runnable official/local HPC queue.",
+            "WN18RR is promoted to all_proven_local but is not in the runnable HPC queue; its evidence is bootstrap-inherited.",
+            "Phase 2 long-run targets produce additive checkpoints/results that do not overwrite short-run artifacts.",
+            "Phase 2 primary targets (P0/P1) should be launched before alternate variants (P2).",
         ],
     }

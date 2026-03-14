@@ -204,7 +204,8 @@ def render_pcba_protocol_report(comparison_payload: dict[str, Any]) -> str:
         ),
         (
             f"- Mode={_format_scalar(local_profile['mode'])}; "
-            f"manifest_path={_format_scalar(local_profile['evidence']['source_path'])}; "
+            f"source_kind={_format_scalar(local_profile['evidence']['source_kind'])}; "
+            f"source_path={_format_scalar(local_profile['evidence']['source_path'])}; "
             f"checkpoint_path={_format_scalar(local_profile['evidence']['checkpoint_path'])}; "
             f"debug_mode={_format_scalar(local_profile['truncation']['debug_mode'])}; "
             f"debug_max_graphs={_format_scalar(local_profile['truncation']['debug_max_graphs'])}; "
@@ -226,7 +227,8 @@ def render_pcba_protocol_report(comparison_payload: dict[str, Any]) -> str:
         ),
         (
             f"- Mode={_format_scalar(full_local_profile['mode'])}; "
-            f"manifest_path={_format_scalar(full_local_profile['evidence']['source_path'])}; "
+            f"source_kind={_format_scalar(full_local_profile['evidence']['source_kind'])}; "
+            f"source_path={_format_scalar(full_local_profile['evidence']['source_path'])}; "
             f"checkpoint_path={_format_scalar(full_local_profile['evidence']['checkpoint_path'])}; "
             f"debug_mode={_format_scalar(full_local_profile['truncation']['debug_mode'])}; "
             f"debug_max_graphs={_format_scalar(full_local_profile['truncation']['debug_max_graphs'])}; "
@@ -286,6 +288,8 @@ def _build_profile_summary(entry: dict[str, Any], *, profile_family: str) -> dic
             "source_path": evidence.get("source_path"),
             "manifest_backed": evidence.get("source_kind") == "suite_manifest",
             "fallback_backed": evidence.get("source_kind") == "result_json_fallback",
+            "manual_hpc_backed": evidence.get("source_kind") == "manual_hpc_result_json",
+            "bootstrap_inherited": bool(evidence.get("bootstrap_inherited")),
             "run_type": evidence.get("run_type"),
             "preview": evidence.get("preview"),
             "evidence_surface": evidence.get("evidence_surface"),
